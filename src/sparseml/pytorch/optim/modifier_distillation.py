@@ -22,6 +22,7 @@ from copy import deepcopy
 from typing import Any, Dict, Iterable, List, Optional, Union
 
 import torch
+from torch.nn import CosineEmbeddingLoss
 import torch.nn.functional as TF
 from torch import Tensor
 from torch.nn import CosineEmbeddingLoss, Module
@@ -120,7 +121,7 @@ class DistillationModifier(ScheduledUpdateModifier):
         self._teacher = None
         self._distillation_enabled = False
 
-        self._logging_steps = logging_steps
+        self._loss_terms = {}
 
     @BaseModifier.sparsification_types.getter
     def sparsification_types(self) -> List[SparsificationTypes]:
@@ -152,7 +153,7 @@ class DistillationModifier(ScheduledUpdateModifier):
         """
         return self._alpha_ce
 
-    @alpha_ce.setter
+    @hardness.setter
     def alpha_ce(self, value: float):
         """
         :params value: how much to weight the cross entropy loss
@@ -166,7 +167,7 @@ class DistillationModifier(ScheduledUpdateModifier):
         """
         return self._alpha_mlm
 
-    @alpha_mlm.setter
+    @hardness.setter
     def alpha_mlm(self, value: float):
         """
         :params value: how much to weight the cross entropy loss
@@ -318,7 +319,7 @@ class DistillationModifier(ScheduledUpdateModifier):
         )
 
     def prepare_inputs(self, inputs):
-        if self.alpha_cos:
+        if self.alpha_cos > 0.0:
             # TODO: too specific to DistilBERT output modeling; need more abstraction
             inputs["output_hidden_states"] = True
         return inputs
@@ -346,15 +347,12 @@ class DistillationModifier(ScheduledUpdateModifier):
             (calculate batch number using this and epoch)
         :return: loss tensor with knowledge distillation loss added
         """
-        self._latest_student__loss = None
-        self._latest_teacher_loss = None
-        self._latest_distillation_loss = None
-        self._latest_student__loss = super().loss_update(
+        loss = super().loss_update(
             loss, module, optimizer, epoch, steps_per_epoch, **kwargs
         )
-
+        self._loss_terms["DistillationModifier/task_loss"] = loss
         if not self.update_ready(epoch, steps_per_epoch):
-            return self._latest_student__loss
+            return loss
 
         if student_outputs is None or student_inputs is None:
             raise ValueError(
@@ -403,17 +401,12 @@ class DistillationModifier(ScheduledUpdateModifier):
             total_loss = ((1.0 - self._hardness) * loss) + (
                 self._hardness * teacher_loss
             )
-            global_step = round(epoch * steps_per_epoch)
-            if self._logging_steps is not None and global_step % self._logging_steps == 0:
-                _log_losses(
-                    self.loggers,
-                    global_step,
-                    {
-                        "task_loss": loss,
-                        "teacher_loss": teacher_loss,
-                        "total_loss": total_loss,
-                    },
-                )
+            self._loss_terms.update(
+                {
+                    "DistillationModifier/teacher_loss": teacher_loss,
+                    "DistillationModifier/total_loss": total_loss
+                }
+            )
         else:
             assert False, "Temporarily disable this code"
             kldiv_output_loss = (
@@ -434,21 +427,39 @@ class DistillationModifier(ScheduledUpdateModifier):
                 + self.alpha_ce * kldiv_output_loss
                 + self.alpha_cos * cosine_embedding_loss
             )
-
-            global_step = round(epoch * steps_per_epoch)
-            if self._logging_steps is not None and global_step % self._logging_steps == 0:
-                _log_losses(
-                    self.loggers,
-                    global_step,
-                    {
-                        "task_loss": loss,
-                        "kldiv_output_loss": kldiv_output_loss,
-                        "cosine_embedding_loss": cosine_embedding_loss,
-                        "total_loss": total_loss,
-                    },
-                )
+            self._loss_terms.update(
+                {
+                    "DistillationModifier/kldiv_output_loss": kldiv_output_loss,
+                    "DistillationModifier/cosine_embedding_loss": cosine_embedding_loss,
+                    "DistillationModifier/total_loss": total_loss
+                }
+            )
 
         return total_loss
+
+    def log_update(
+        self,
+        module: Module,
+        optimizer: Optimizer,
+        epoch: float,
+        steps_per_epoch: int,
+    ):
+        """
+        log the latest set of losses
+
+        :param module: module to modify
+        :param optimizer: optimizer to modify
+        :param epoch: current epoch and progress within the current epoch
+        :param steps_per_epoch: number of steps taken within each epoch
+            (calculate batch number using this and epoch)
+        """
+        super().log_update(module, optimizer, epoch, steps_per_epoch)
+
+        self.log_named_scalars(
+            name_value_pairs=self._loss_terms.items(),
+            epoch=epoch,
+            steps_per_epoch=steps_per_epoch,
+        )
 
     def finalize(
         self, module: Optional[Module] = None, reset_loggers: bool = True, **kwargs
