@@ -311,6 +311,16 @@ class Modifier(BaseModifier):
         if not self._enabled:
             raise RuntimeError("modifier must be enabled")
 
+    def prepare_inputs(self, inputs):
+        """
+        Modifiers optionally change the inputs before being called by the model
+        A use case: distillation modifier might add "output_hidden_states" or
+        "output_attentions" to the inputs, signaling the model to output
+        hidden states and attention outputs so that distillation loss computed
+        from these information can be computed
+        """
+        return inputs
+
     def loss_update(
         self,
         loss: Tensor,

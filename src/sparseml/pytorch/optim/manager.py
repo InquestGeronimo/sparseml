@@ -178,6 +178,9 @@ class RecipeManagerStepWrapper(object):
         """
         self._perform_wrapped_step(skip_orig_step=True)
 
+    def prepare_inputs(self, inputs):
+        inputs = self._wrapped_manager.prepare_inputs(inputs)
+
     def loss_update(self, loss: Tensor) -> Tensor:
         """
         Optional call to update modifiers based on the calculated loss.
@@ -414,7 +417,6 @@ class ScheduledModifierManager(BaseManager, Modifier):
         """
         super().initialize(module, epoch, loggers, **kwargs)
         self._initialize_epoch = epoch
-
         for mod in self.iter_modifiers():
             if mod.initialized:
                 # check in case modifier was initialized from apply_structure
@@ -547,6 +549,13 @@ class ScheduledModifierManager(BaseManager, Modifier):
                 mod.scheduled_update(module, optimizer, epoch, steps_per_epoch)
                 if log_updates:
                     mod.scheduled_log_update(module, optimizer, epoch, steps_per_epoch)
+
+    def prepare_inputs(self, inputs):
+        for mod in self.iter_modifiers():
+            if not mod.enabled:
+                continue
+            inputs = mod.prepare_inputs(inputs)
+        return inputs
 
     def loss_update(
         self,

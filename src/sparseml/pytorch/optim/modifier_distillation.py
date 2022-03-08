@@ -22,6 +22,7 @@ from copy import deepcopy
 from typing import Any, Dict, Iterable, List, Optional, Union
 
 import torch
+from torch.nn import CosineEmbeddingLoss
 import torch.nn.functional as TF
 from torch import Tensor
 from torch.nn import Module
@@ -62,6 +63,15 @@ class DistillationModifier(ScheduledUpdateModifier):
     |       temperature: 2.0
     |       distill_output_keys: [0]
 
+    | Sample yaml:
+    |   !DistillationModifier
+    |       start_epoch: 0.0
+    |       alpha_ce: 0.5
+    |       alpha_mlm: 0.5
+    |       alpha_cos: 0.5
+    |       temperature: 2.0
+    |       distill_output_keys: [0]
+
     :param start_epoch: The epoch to start the modifier at
     :param hardness: how much to weight the distillation loss vs the base loss
         (e.g. hardness of 0.6 will return 0.6 * distill_loss + 0.4 * base_loss).
@@ -81,6 +91,9 @@ class DistillationModifier(ScheduledUpdateModifier):
         start_epoch: float = -1.0,
         end_epoch: float = -1.0,
         hardness: float = 0.5,
+        alpha_ce: float = 1.0,
+        alpha_mlm: float = 1.0,
+        alpha_cos: float = 1.0,
         temperature: float = 2.0,
         distill_output_keys: List[Any] = None,
         teacher_input_keys: List[Any] = None,
@@ -92,6 +105,9 @@ class DistillationModifier(ScheduledUpdateModifier):
             end_comparator=-1,
         )
         self._hardness = hardness
+        self._alpha_ce = alpha_ce
+        self._alpha_mlm = alpha_mlm
+        self._alpha_cos = alpha_cos
         self._temperature = temperature
         self._distill_output_keys = distill_output_keys
         self._teacher_input_keys = teacher_input_keys
@@ -121,6 +137,48 @@ class DistillationModifier(ScheduledUpdateModifier):
             (e.g. hardness of 0.6 will return 0.6 * distill_loss + 0.4 * base_loss)
         """
         self._hardness = value
+
+    @ModifierProp()
+    def alpha_ce(self) -> float:
+        """
+        :return: how much to weight the cross entropy loss
+        """
+        return self._alpha_ce
+
+    @hardness.setter
+    def alpha_ce(self, value: float):
+        """
+        :params value: how much to weight the cross entropy loss
+        """
+        self._alpha_ce = value
+
+    @ModifierProp()
+    def alpha_mlm(self) -> float:
+        """
+        :return: how much to weight the cross entropy loss
+        """
+        return self._alpha_mlm
+
+    @hardness.setter
+    def alpha_mlm(self, value: float):
+        """
+        :params value: how much to weight the cross entropy loss
+        """
+        self._alpha_mlm = value
+
+    @ModifierProp()
+    def alpha_cos(self) -> float:
+        """
+        :return: how much to weight the cross entropy loss
+        """
+        return self._alpha_cos
+
+    @hardness.setter
+    def alpha_cos(self, value: float):
+        """
+        :params value: how much to weight the cross entropy loss
+        """
+        self._alpha_cos = value
 
     @ModifierProp()
     def temperature(self) -> float:
@@ -238,6 +296,12 @@ class DistillationModifier(ScheduledUpdateModifier):
             epoch, steps_per_epoch
         )
 
+    def prepare_inputs(self, inputs):
+        if self.alpha_cos:
+            # TODO: too specific to DistilBERT output modeling; need more abstraction
+            inputs["output_hidden_states"] = True
+        return inputs
+
     @ScheduledModifier.log_call
     def loss_update(
         self,
@@ -273,7 +337,7 @@ class DistillationModifier(ScheduledUpdateModifier):
 
         if student_outputs is None or student_inputs is None:
             raise ValueError(
-                "Student outputs and teacher inputs are required for "
+                "Student outputs and student inputs are required for "
                 "distillation loss update"
             )
 
@@ -284,6 +348,10 @@ class DistillationModifier(ScheduledUpdateModifier):
         )
         # copy to keep from updating student's inputs
         teacher_inputs = deepcopy(teacher_inputs)
+
+        # if self.alpha_cos > 0.0:
+        #     student_inputs["output_hidden_states"] = True
+        #     teacher_inputs["output_hidden_states"] = True
 
         if self._teacher == "self":
             _LOGGER.info("Copying current models state for self distillation")
@@ -312,26 +380,56 @@ class DistillationModifier(ScheduledUpdateModifier):
                 f"teacher output type of {type(teacher_outputs)}"
             )
 
-        distill_losses = []
+        teacher_loss = {}
+        # Distillation loss from the head outputs
+        distill_head_output_losses = []
         if isinstance(student_outputs, Tensor):
-            distill_losses.append(
-                self._calc_distill_loss(student_outputs, teacher_outputs)
+            distill_head_output_losses.append(
+                self._calc_distill_head_output_loss(student_outputs, teacher_outputs)
             )
         elif isinstance(student_outputs, Dict):
             for key in self._distill_output_keys or student_outputs:
-                distill_losses.append(
-                    self._calc_distill_loss(student_outputs[key], teacher_outputs[key])
+                distill_head_output_losses.append(
+                    self._calc_distill_head_output_loss(student_outputs[key], teacher_outputs[key])
                 )
         elif isinstance(student_outputs, Iterable):
             for idx in self._distill_output_keys or range(len(student_outputs)):
-                distill_losses.append(
-                    self._calc_distill_loss(student_outputs[idx], teacher_outputs[idx])
+                distill_head_output_losses.append(
+                    self._calc_distill_head_output_loss(student_outputs[idx], teacher_outputs[idx])
                 )
+        kl_div_output_loss = sum(distill_head_output_losses) / len(distill_head_output_losses) if distill_head_output_losses else 0.0
+        teacher_loss["head_outputs"] = kl_div_output_loss
 
-        # get distillation loss as average of individual output distillation loss values
-        self._latest_teacher_loss = sum(distill_losses) / len(distill_losses)
-        self._latest_distillation_loss = ((1.0 - self._hardness) * loss) + (
-            self._hardness * self._latest_teacher_loss
+        # Distillation loss from input embedding
+        loss_cos = 0.0
+        if self.alpha_cos > 0.0:
+            s_hidden_states = student_outputs["hidden_states"][-1]  # (bs, seq_length, dim)
+            t_hidden_states = teacher_outputs["hidden_states"][-1]  # (bs, seq_length, dim)
+
+            # TODO: attention mask taking into account token counts
+            attention_mask = student_inputs["attention_mask"]
+            mask = attention_mask.unsqueeze(-1).expand_as(s_hidden_states).bool()  # (bs, seq_length, dim)
+            assert s_hidden_states.size() == t_hidden_states.size()
+            dim = s_hidden_states.size(-1)
+
+            s_hidden_states_slct = torch.masked_select(s_hidden_states, mask)  # (bs * seq_length * dim)
+            s_hidden_states_slct = s_hidden_states_slct.view(-1, dim)  # (bs * seq_length, dim)
+            t_hidden_states_slct = torch.masked_select(t_hidden_states, mask)  # (bs * seq_length * dim)
+            t_hidden_states_slct = t_hidden_states_slct.view(-1, dim)  # (bs * seq_length, dim)
+
+            target = s_hidden_states_slct.new(s_hidden_states_slct.size(0)).fill_(1)  # (bs * seq_length,)
+            cosine_loss_fct = CosineEmbeddingLoss(reduction="mean")
+            loss_cos = cosine_loss_fct(s_hidden_states_slct, t_hidden_states_slct, target)
+        teacher_loss["cosine_embedding"] = loss_cos
+
+        distillation_loss = self.alpha_mlm * loss + self.alpha_ce * teacher_loss["head_outputs"] + \
+                            self.alpha_cos * teacher_loss["cosine_embedding"]
+        _log_losses(
+            self.loggers,
+            round(epoch * steps_per_epoch),
+            loss,
+            teacher_loss,
+            distillation_loss,
         )
 
         return self._latest_distillation_loss
@@ -383,12 +481,28 @@ class DistillationModifier(ScheduledUpdateModifier):
         self._teacher = None
         self._distillation_enabled = False
 
-    def _calc_distill_loss(self, student_val: Tensor, teacher_val: Tensor) -> Tensor:
-        return (
-            TF.kl_div(
+    def _calc_distill_head_output_loss(self, student_val: Tensor, teacher_val: Tensor) -> Tensor:
+        v = TF.kl_div(
                 input=TF.log_softmax(student_val / self._temperature, dim=-1),
                 target=TF.softmax(teacher_val / self._temperature, dim=-1),
                 reduction="batchmean",
-            )
-            * (self._temperature ** 2)
-        )
+            ) * (self._temperature ** 2) / (student_val.numel() / student_val.shape[-1])
+        return v
+
+
+def _log_losses(
+    loggers: List[BaseLogger],
+    global_step: int,
+    original_loss: float,
+    teacher_loss: float,
+    distillation_loss: float,
+):
+    losses = {
+        "original_loss": original_loss,
+        "teacher_loss": teacher_loss,
+        "distillation_loss": distillation_loss,
+    }
+
+    for logger in loggers:
+        for (name, loss) in losses.items():
+            logger.log_scalar(f"DistillationModifier/{name}", loss.item(), global_step)

@@ -326,6 +326,11 @@ class RecipeManagerTrainerInterface:
         ):
             return super().compute_loss(model, inputs, return_outputs=return_outputs)
 
+        # Certain modifiers requires to modify the inputs before they are being run
+        # through the model. As an example, the ModifierDistillation indicates requests for
+        # hidden_states or attention as part of the model outputs
+        inputs = self.manager.prepare_inputs(inputs)
+
         student_outputs = model(**inputs)
         loss = student_outputs["loss"]
         loss = self.manager.loss_update(
