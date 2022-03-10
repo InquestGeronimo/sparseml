@@ -493,7 +493,7 @@ class DistillationModifier(ScheduledUpdateModifier):
         )
         return v
 
-    def _kldiv_output_loss(self, student_outputs, teacher_outputs):
+    def _kldiv_output_losses(self, student_outputs, teacher_outputs):
         # Distillation loss from the head outputs
         distill_head_output_losses = []
         if isinstance(student_outputs, Tensor):
@@ -559,3 +559,4 @@ def _log_losses(
     for logger in loggers:
         for (name, loss) in losses.items():
             logger.log_scalar(f"DistillationModifier/{name}", loss.item(), step=global_step)
+
