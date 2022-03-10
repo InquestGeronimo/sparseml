@@ -22,10 +22,9 @@ from copy import deepcopy
 from typing import Any, Dict, Iterable, List, Optional, Union
 
 import torch
-from torch.nn import CosineEmbeddingLoss
 import torch.nn.functional as TF
 from torch import Tensor
-from torch.nn import Module
+from torch.nn import CosineEmbeddingLoss, Module
 from torch.optim import Optimizer
 
 from sparseml.optim import BaseModifier, ModifierProp
@@ -108,7 +107,9 @@ class DistillationModifier(ScheduledUpdateModifier):
         self._alpha_ce = alpha_ce
         self._alpha_mlm = alpha_mlm
         self._alpha_cos = alpha_cos
-        self._cosine_loss_fct = CosineEmbeddingLoss(reduction="mean") if alpha_cos > 0.0 else None
+        self._cosine_loss_fct = (
+            CosineEmbeddingLoss(reduction="mean") if alpha_cos > 0.0 else None
+        )
         self._temperature = temperature
         self._distill_output_keys = distill_output_keys
         self._teacher_input_keys = teacher_input_keys
@@ -146,7 +147,7 @@ class DistillationModifier(ScheduledUpdateModifier):
         """
         return self._alpha_ce
 
-    @hardness.setter
+    @alpha_ce.setter
     def alpha_ce(self, value: float):
         """
         :params value: how much to weight the cross entropy loss
@@ -160,7 +161,7 @@ class DistillationModifier(ScheduledUpdateModifier):
         """
         return self._alpha_mlm
 
-    @hardness.setter
+    @alpha_mlm.setter
     def alpha_mlm(self, value: float):
         """
         :params value: how much to weight the cross entropy loss
@@ -174,7 +175,7 @@ class DistillationModifier(ScheduledUpdateModifier):
         """
         return self._alpha_cos
 
-    @hardness.setter
+    @alpha_cos.setter
     def alpha_cos(self, value: float):
         """
         :params value: how much to weight the cross entropy loss
@@ -350,6 +351,10 @@ class DistillationModifier(ScheduledUpdateModifier):
         # copy to keep from updating student's inputs
         teacher_inputs = deepcopy(teacher_inputs)
 
+        # if self.alpha_cos > 0.0:
+        #     student_inputs["output_hidden_states"] = True
+        #     teacher_inputs["output_hidden_states"] = True
+
         if self._teacher == "self":
             _LOGGER.info("Copying current models state for self distillation")
             self._teacher = deepcopy(module)
@@ -377,10 +382,25 @@ class DistillationModifier(ScheduledUpdateModifier):
                 f"teacher output type of {type(teacher_outputs)}"
             )
 
-        kldiv_output_loss = self._kldiv_output_loss(student_outputs, teacher_outputs) if self.alpha_ce > 0.0 else 0.0
-        cosine_embedding_loss = self._cosine_embedding_loss(student_outputs, teacher_outputs) if self.alpha_cos > 0.0 else 0.0
-        total_loss = self.alpha_mlm * loss + self.alpha_ce * distill_losses["head_outputs"] + \
-                     self.alpha_cos * distill_losses["cosine_embedding"]
+        kldiv_output_loss = (
+            self._kldiv_output_loss(student_outputs, teacher_outputs)
+            if self.alpha_ce > 0.0
+            else 0.0
+        )
+        cosine_embedding_loss = (
+            self._cosine_embedding_loss(
+                student_inputs, student_outputs, teacher_outputs
+            )
+            if self.alpha_cos > 0.0
+            else 0.0
+        )
+
+        total_loss = (
+            self.alpha_mlm * loss
+            + self.alpha_ce * kldiv_output_loss
+            + self.alpha_cos * cosine_embedding_loss
+        )
+
         _log_losses(
             self.loggers,
             round(epoch * steps_per_epoch),
@@ -388,8 +408,8 @@ class DistillationModifier(ScheduledUpdateModifier):
                 "task_loss": loss,
                 "kldiv_output_loss": kldiv_output_loss,
                 "cosine_embedding_loss": cosine_embedding_loss,
-                "total_loss": total_loss
-            }
+                "total_loss": total_loss,
+            },
         )
 
         return total_loss
@@ -412,12 +432,18 @@ class DistillationModifier(ScheduledUpdateModifier):
         self._teacher = None
         self._distillation_enabled = False
 
-    def _calc_distill_head_output_loss(self, student_val: Tensor, teacher_val: Tensor) -> Tensor:
-        v = TF.kl_div(
+    def _calc_distill_head_output_loss(
+        self, student_val: Tensor, teacher_val: Tensor
+    ) -> Tensor:
+        v = (
+            TF.kl_div(
                 input=TF.log_softmax(student_val / self._temperature, dim=-1),
                 target=TF.softmax(teacher_val / self._temperature, dim=-1),
                 reduction="sum",
-            ) * (self._temperature ** 2) / (student_val.numel() / student_val.shape[-1])
+            )
+            * (self._temperature**2)
+            / (student_val.numel() / student_val.shape[-1])
+        )
         return v
 
     def _kldiv_output_losses(self, student_outputs, teacher_outputs):
@@ -430,31 +456,51 @@ class DistillationModifier(ScheduledUpdateModifier):
         elif isinstance(student_outputs, Dict):
             for key in self._distill_output_keys or student_outputs:
                 distill_head_output_losses.append(
-                    self._calc_distill_head_output_loss(student_outputs[key], teacher_outputs[key])
+                    self._calc_distill_head_output_loss(
+                        student_outputs[key], teacher_outputs[key]
+                    )
                 )
         elif isinstance(student_outputs, Iterable):
             for idx in self._distill_output_keys or range(len(student_outputs)):
                 distill_head_output_losses.append(
-                    self._calc_distill_head_output_loss(student_outputs[idx], teacher_outputs[idx])
+                    self._calc_distill_head_output_loss(
+                        student_outputs[idx], teacher_outputs[idx]
+                    )
                 )
-        kldiv_output_loss = sum(distill_head_output_losses) / len(distill_head_output_losses) if distill_head_output_losses else 0.0
+        kldiv_output_loss = (
+            sum(distill_head_output_losses) / len(distill_head_output_losses)
+            if distill_head_output_losses
+            else 0.0
+        )
         return kldiv_output_loss
 
-    def _cosine_embedding_loss(self, student_outputs, teacher_outputs):
+    def _cosine_embedding_loss(self, student_inputs, student_outputs, teacher_outputs):
         s_hidden_states = student_outputs["hidden_states"][-1]  # (bs, seq_length, dim)
         t_hidden_states = teacher_outputs["hidden_states"][-1]  # (bs, seq_length, dim)
 
         attention_mask = student_inputs["attention_mask"]
-        mask = attention_mask.unsqueeze(-1).expand_as(s_hidden_states).bool()  # (bs, seq_length, dim)
+        mask = (
+            attention_mask.unsqueeze(-1).expand_as(s_hidden_states).bool()
+        )  # (bs, seq_length, dim)
         assert s_hidden_states.size() == t_hidden_states.size()
         dim = s_hidden_states.size(-1)
 
-        s_hidden_states_slct = torch.masked_select(s_hidden_states, mask)  # (bs * seq_length * dim)
-        s_hidden_states_slct = s_hidden_states_slct.view(-1, dim)  # (bs * seq_length, dim)
-        t_hidden_states_slct = torch.masked_select(t_hidden_states, mask)  # (bs * seq_length * dim)
-        t_hidden_states_slct = t_hidden_states_slct.view(-1, dim)  # (bs * seq_length, dim)
+        s_hidden_states_slct = torch.masked_select(
+            s_hidden_states, mask
+        )  # (bs * seq_length * dim)
+        s_hidden_states_slct = s_hidden_states_slct.view(
+            -1, dim
+        )  # (bs * seq_length, dim)
+        t_hidden_states_slct = torch.masked_select(
+            t_hidden_states, mask
+        )  # (bs * seq_length * dim)
+        t_hidden_states_slct = t_hidden_states_slct.view(
+            -1, dim
+        )  # (bs * seq_length, dim)
 
-        target = s_hidden_states_slct.new(s_hidden_states_slct.size(0)).fill_(1)  # (bs * seq_length,)
+        target = s_hidden_states_slct.new(s_hidden_states_slct.size(0)).fill_(
+            1
+        )  # (bs * seq_length,)
         return self._cosine_loss_fct(s_hidden_states_slct, t_hidden_states_slct, target)
 
 
