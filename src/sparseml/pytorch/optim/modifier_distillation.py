@@ -22,7 +22,6 @@ from copy import deepcopy
 from typing import Any, Dict, Iterable, List, Optional, Union
 
 import torch
-from torch.nn import CosineEmbeddingLoss
 import torch.nn.functional as TF
 from torch import Tensor
 from torch.nn import CosineEmbeddingLoss, Module
@@ -153,7 +152,7 @@ class DistillationModifier(ScheduledUpdateModifier):
         """
         return self._alpha_ce
 
-    @hardness.setter
+    @alpha_ce.setter
     def alpha_ce(self, value: float):
         """
         :params value: how much to weight the cross entropy loss
@@ -167,7 +166,7 @@ class DistillationModifier(ScheduledUpdateModifier):
         """
         return self._alpha_mlm
 
-    @hardness.setter
+    @alpha_mlm.setter
     def alpha_mlm(self, value: float):
         """
         :params value: how much to weight the cross entropy loss
@@ -368,6 +367,10 @@ class DistillationModifier(ScheduledUpdateModifier):
         # copy to keep from updating student's inputs
         teacher_inputs = deepcopy(teacher_inputs)
 
+        # if self.alpha_cos > 0.0:
+        #     student_inputs["output_hidden_states"] = True
+        #     teacher_inputs["output_hidden_states"] = True
+
         if self._teacher == "self":
             _LOGGER.info("Copying current models state for self distillation")
             self._teacher = deepcopy(module)
@@ -549,14 +552,4 @@ class DistillationModifier(ScheduledUpdateModifier):
             1
         )  # (bs * seq_length,)
         return self._cosine_loss_fct(s_hidden_states_slct, t_hidden_states_slct, target)
-
-
-def _log_losses(
-    loggers: List[BaseLogger],
-    global_step: int,
-    losses: Dict[str, float],
-):
-    for logger in loggers:
-        for (name, loss) in losses.items():
-            logger.log_scalar(f"DistillationModifier/{name}", loss.item(), step=global_step)
 
