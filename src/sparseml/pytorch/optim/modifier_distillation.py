@@ -367,10 +367,6 @@ class DistillationModifier(ScheduledUpdateModifier):
         # copy to keep from updating student's inputs
         teacher_inputs = deepcopy(teacher_inputs)
 
-        # if self.alpha_cos > 0.0:
-        #     student_inputs["output_hidden_states"] = True
-        #     teacher_inputs["output_hidden_states"] = True
-
         if self._teacher == "self":
             _LOGGER.info("Copying current models state for self distillation")
             self._teacher = deepcopy(module)
@@ -424,7 +420,6 @@ class DistillationModifier(ScheduledUpdateModifier):
                 if self.alpha_cos > 0.0
                 else 0.0
             )
-
             total_loss = (
                 self.alpha_mlm * loss
                 + self.alpha_ce * kldiv_output_loss
@@ -496,7 +491,7 @@ class DistillationModifier(ScheduledUpdateModifier):
         )
         return v
 
-    def _kldiv_output_losses(self, student_outputs, teacher_outputs):
+    def _kldiv_output_loss(self, student_outputs, teacher_outputs):
         # Distillation loss from the head outputs
         distill_head_output_losses = []
         if isinstance(student_outputs, Tensor):
@@ -552,4 +547,3 @@ class DistillationModifier(ScheduledUpdateModifier):
             1
         )  # (bs * seq_length,)
         return self._cosine_loss_fct(s_hidden_states_slct, t_hidden_states_slct, target)
-
