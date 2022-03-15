@@ -97,11 +97,14 @@ class DistillationModifier(ScheduledUpdateModifier):
         distill_output_keys: List[Any] = None,
         teacher_input_keys: List[Any] = None,
         update_frequency: float = -1.0,
+        log_types: Union[str, List[str]] = None,
+        logging_steps: int = None,
     ):
         super().__init__(
             start_epoch=start_epoch,
             end_epoch=end_epoch,
             end_comparator=-1,
+            log_types=log_types
         )
         self._hardness = hardness
         self._alpha_ce = alpha_ce
@@ -116,6 +119,8 @@ class DistillationModifier(ScheduledUpdateModifier):
 
         self._teacher = None
         self._distillation_enabled = False
+
+        self._logging_steps = logging_steps
 
     @BaseModifier.sparsification_types.getter
     def sparsification_types(self) -> List[SparsificationTypes]:
@@ -197,6 +202,20 @@ class DistillationModifier(ScheduledUpdateModifier):
             distillation
         """
         self._temperature = value
+
+    @ModifierProp()
+    def logging_steps(self) -> float:
+        """
+        :return: logging_steps
+        """
+        return self._logging_steps
+
+    @logging_steps.setter
+    def logging_steps(self, value: float):
+        """
+        :params value: logging_steps to set
+        """
+        self._logging_steps = value
 
     @ModifierProp()
     def distill_output_keys(self) -> Optional[List[Any]]:
@@ -351,10 +370,6 @@ class DistillationModifier(ScheduledUpdateModifier):
         # copy to keep from updating student's inputs
         teacher_inputs = deepcopy(teacher_inputs)
 
-        # if self.alpha_cos > 0.0:
-        #     student_inputs["output_hidden_states"] = True
-        #     teacher_inputs["output_hidden_states"] = True
-
         if self._teacher == "self":
             _LOGGER.info("Copying current models state for self distillation")
             self._teacher = deepcopy(module)
@@ -401,16 +416,18 @@ class DistillationModifier(ScheduledUpdateModifier):
             + self.alpha_cos * cosine_embedding_loss
         )
 
-        _log_losses(
-            self.loggers,
-            round(epoch * steps_per_epoch),
-            {
-                "task_loss": loss,
-                "kldiv_output_loss": kldiv_output_loss,
-                "cosine_embedding_loss": cosine_embedding_loss,
-                "total_loss": total_loss,
-            },
-        )
+        global_step = round(epoch * steps_per_epoch)
+        if self._logging_steps is not None and global_step % self._logging_steps == 0:
+            _log_losses(
+                self.loggers,
+                global_step,
+                {
+                    "task_loss": loss,
+                    "kldiv_output_loss": kldiv_output_loss,
+                    "cosine_embedding_loss": cosine_embedding_loss,
+                    "total_loss": total_loss,
+                },
+            )
 
         return total_loss
 
@@ -446,7 +463,7 @@ class DistillationModifier(ScheduledUpdateModifier):
         )
         return v
 
-    def _kldiv_output_losses(self, student_outputs, teacher_outputs):
+    def _kldiv_output_loss(self, student_outputs, teacher_outputs):
         # Distillation loss from the head outputs
         distill_head_output_losses = []
         if isinstance(student_outputs, Tensor):
@@ -511,4 +528,4 @@ def _log_losses(
 ):
     for logger in loggers:
         for (name, loss) in losses.items():
-            logger.log_scalar(f"DistillationModifier/{name}", loss.item(), global_step)
+            logger.log_scalar(f"DistillationModifier/{name}", loss.item(), step=global_step)
