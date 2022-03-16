@@ -89,10 +89,10 @@ class DistillationModifier(ScheduledUpdateModifier):
         self,
         start_epoch: float = -1.0,
         end_epoch: float = -1.0,
-        hardness: float = 0.5,
-        alpha_ce: float = 1.0,
-        alpha_mlm: float = 1.0,
-        alpha_cos: float = 1.0,
+        hardness: float = -1.0,
+        alpha_ce: float = 0.0,
+        alpha_mlm: float = 0.0,
+        alpha_cos: float = 0.0,
         temperature: float = 2.0,
         distill_output_keys: List[Any] = None,
         teacher_input_keys: List[Any] = None,
@@ -397,37 +397,55 @@ class DistillationModifier(ScheduledUpdateModifier):
                 f"teacher output type of {type(teacher_outputs)}"
             )
 
-        kldiv_output_loss = (
-            self._kldiv_output_loss(student_outputs, teacher_outputs)
-            if self.alpha_ce > 0.0
-            else 0.0
-        )
-        cosine_embedding_loss = (
-            self._cosine_embedding_loss(
-                student_inputs, student_outputs, teacher_outputs
+        if self._hardness >= 0.0:
+            # For backwards compatiability
+            teacher_loss = self._kldiv_output_loss(student_outputs, teacher_outputs)
+            total_loss = ((1.0 - self._hardness) * loss) + (
+                self._hardness * teacher_loss
             )
-            if self.alpha_cos > 0.0
-            else 0.0
-        )
-
-        total_loss = (
-            self.alpha_mlm * loss
-            + self.alpha_ce * kldiv_output_loss
-            + self.alpha_cos * cosine_embedding_loss
-        )
-
-        global_step = round(epoch * steps_per_epoch)
-        if self._logging_steps is not None and global_step % self._logging_steps == 0:
-            _log_losses(
-                self.loggers,
-                global_step,
-                {
-                    "task_loss": loss,
-                    "kldiv_output_loss": kldiv_output_loss,
-                    "cosine_embedding_loss": cosine_embedding_loss,
-                    "total_loss": total_loss,
-                },
+            global_step = round(epoch * steps_per_epoch)
+            if self._logging_steps is not None and global_step % self._logging_steps == 0:
+                _log_losses(
+                    self.loggers,
+                    global_step,
+                    {
+                        "task_loss": loss,
+                        "teacher_loss": teacher_loss,
+                        "total_loss": total_loss,
+                    },
+                )
+        else:
+            kldiv_output_loss = (
+                self._kldiv_output_loss(student_outputs, teacher_outputs)
+                if self.alpha_ce > 0.0
+                else 0.0
             )
+            cosine_embedding_loss = (
+                self._cosine_embedding_loss(
+                    student_inputs, student_outputs, teacher_outputs
+                )
+                if self.alpha_cos > 0.0
+                else 0.0
+            )
+
+            total_loss = (
+                self.alpha_mlm * loss
+                + self.alpha_ce * kldiv_output_loss
+                + self.alpha_cos * cosine_embedding_loss
+            )
+
+            global_step = round(epoch * steps_per_epoch)
+            if self._logging_steps is not None and global_step % self._logging_steps == 0:
+                _log_losses(
+                    self.loggers,
+                    global_step,
+                    {
+                        "task_loss": loss,
+                        "kldiv_output_loss": kldiv_output_loss,
+                        "cosine_embedding_loss": cosine_embedding_loss,
+                        "total_loss": total_loss,
+                    },
+                )
 
         return total_loss
 
