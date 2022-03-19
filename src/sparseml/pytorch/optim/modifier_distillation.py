@@ -415,6 +415,7 @@ class DistillationModifier(ScheduledUpdateModifier):
                     },
                 )
         else:
+            assert False, "Temporarily disable this code"
             kldiv_output_loss = (
                 self._kldiv_output_loss(student_outputs, teacher_outputs)
                 if self.alpha_ce > 0.0
