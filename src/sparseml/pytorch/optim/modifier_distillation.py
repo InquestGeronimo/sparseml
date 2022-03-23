@@ -97,14 +97,11 @@ class DistillationModifier(ScheduledUpdateModifier):
         distill_output_keys: List[Any] = None,
         teacher_input_keys: List[Any] = None,
         update_frequency: float = -1.0,
-        log_types: Union[str, List[str]] = None,
-        logging_steps: int = None,
     ):
         super().__init__(
             start_epoch=start_epoch,
             end_epoch=end_epoch,
             end_comparator=-1,
-            log_types=log_types
         )
         self._hardness = hardness
         self._alpha_ce = alpha_ce
@@ -202,20 +199,6 @@ class DistillationModifier(ScheduledUpdateModifier):
             distillation
         """
         self._temperature = value
-
-    @ModifierProp()
-    def logging_steps(self) -> float:
-        """
-        :return: logging_steps
-        """
-        return self._logging_steps
-
-    @logging_steps.setter
-    def logging_steps(self, value: float):
-        """
-        :params value: logging_steps to set
-        """
-        self._logging_steps = value
 
     @ModifierProp()
     def distill_output_keys(self) -> Optional[List[Any]]:
