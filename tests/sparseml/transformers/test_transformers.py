@@ -40,9 +40,9 @@ def _compare_onnx_models(model1, model2):
        # used in the original graph to create
        # logits and softmax heads
 
-    nodes1 = model1.graph.nodes
+    nodes1 = model1.graph.node
     nodes1_names = [node.name for node in nodes1]
-    nodes2 = model2.graph.nodes
+    nodes2 = model2.graph.node
     nodes2_names = [node.name for node in nodes2]
 
     nodes1_names_diff = [
@@ -82,8 +82,8 @@ def _compare_onnx_nodes(n1, n2):
     [
         (
             "zoo:nlp/question_answering/bert-base/pytorch/huggingface/squad/pruned-conservative",  # noqa: E501
-            "question-answering",
             False,
+            "question-answering",
         )
     ],
     scope="function",
