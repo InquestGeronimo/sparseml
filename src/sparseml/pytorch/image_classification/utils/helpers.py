@@ -27,6 +27,7 @@ from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 
 from sparseml.pytorch.datasets import DatasetRegistry, ssd_collate_fn, yolo_collate_fn
+from sparseml.pytorch.datasets import ImageFolderFFCV
 from sparseml.pytorch.models import ModelRegistry
 from sparseml.pytorch.optim import ScheduledModifierManager, ScheduledOptimizer
 from sparseml.pytorch.sparsification import ConstantPruningModifier
@@ -169,6 +170,7 @@ def _create_train_dataset_and_loader(
             sampler=sampler,
             collate_fn=_get_collate_fn(arch_key=args.arch_key, task=task),
         )
+
         print(f"created train_dataset: {train_dataset}")
         return train_dataset, train_loader
 
@@ -195,6 +197,7 @@ def _create_val_dataset_and_loader(
         )
         if args.is_main_process:
             is_training = task == Tasks.TRAIN
+
             val_loader = DataLoader(
                 val_dataset,
                 batch_size=args.test_batch_size if is_training else 1,
@@ -214,6 +217,47 @@ def _create_val_dataset_and_loader(
     return None, None  # val dataset not needed
 
 
+def _create_ffcv_train_and_val_loaders(args, image_size: int = 224):
+    train_dataset = DatasetRegistry.create(
+        args.dataset,
+        root=args.dataset_path,
+        train=True,
+        rand_trans=True,
+        image_size=image_size,
+        **args.dataset_kwargs,
+    )
+
+    ffcv_train_dataset = ImageFolderFFCV(
+        dataset=train_dataset,
+    )
+
+    train_loader = ffcv_train_dataset.get_loader(
+        num_workers=args.loader_num_workers,
+        batch_size=args.train_batch_size,
+    )
+
+    val_dataset = DatasetRegistry.create(
+        args.dataset,
+        root=args.dataset_path,
+        train=False,
+        rand_trans=False,
+        image_size=image_size,
+        **args.dataset_kwargs,
+    )
+
+    ffcv_val_dataset = ImageFolderFFCV(
+        dataset=val_dataset, write_path="data/ffcv/val.beton"
+    )
+
+    val_loader = ffcv_val_dataset.get_loader(
+        num_workers=args.loader_num_workers,
+        batch_size=args.test_batch_size,
+        validation=True,
+    )
+
+    return train_dataset, train_loader, val_dataset, val_loader
+
+
 def get_train_and_validation_loaders(
     args: Any, image_size: Tuple[int, ...], task: Optional[Tasks] = None
 ):
@@ -224,6 +268,9 @@ def get_train_and_validation_loaders(
     :return: 4 element tuple with the following format (train_dataset,
         train_loader, val_dataset, val_loader)
     """
+    if hasattr(args, "ffcv") and args.ffcv:
+        return _create_ffcv_train_and_val_loaders(args, image_size)
+
     train_dataset, train_loader = _create_train_dataset_and_loader(
         args, image_size, task=task
     )

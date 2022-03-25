@@ -454,6 +454,11 @@ class TrainingArguments:
         default=True, metadata={"help": "Use pinned memory for data loading"}
     )
 
+    ffcv: Optional[bool] = field(
+        default=False,
+        metadata={"help": "Use FFCV for training."},
+    )
+
     def __post_init__(self):
         # add ddp args
         env_world_size = int(os.environ.get("WORLD_SIZE", 1))
