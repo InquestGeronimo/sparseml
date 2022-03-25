@@ -13,13 +13,27 @@
 # limitations under the License.
 
 import glob
+import math
 import os
+import shutil
 
 import onnx
 import pytest
+from transformers import AutoConfig
 
+from sparseml.transformers.sparsification import Trainer
 from sparsezoo import Zoo
-from src.sparseml.transformers import export_transformer_to_onnx
+from src.sparseml.transformers import export_transformer_to_onnx, load_task_model
+
+
+def is_yaml_recipe_present(model_path):
+    return any(
+        [
+            file
+            for file in glob.glob(os.path.join(model_path, "*"))
+            if file.endswith(".yaml")
+        ]
+    )
 
 
 def _compare_onnx_models(model1, model2):
@@ -28,38 +42,43 @@ def _compare_onnx_models(model1, model2):
         "Equal",
         "Gather",
         "Shape",
-        # above, those are the ops which are used in the
+        # ops above are those which are used in the
         # original graph to create logits and softmax heads
         "Constant",
         "Cast",
-    ]  # above, the remaining optional nodes
+    ]  # ops above are the remaining optional nodes
     optional_nodes_model2 = [
         "Constant",
         "Squeeze",
-    ]  # above, those are the ops which are
-       # used in the original graph to create
-       # logits and softmax heads
+    ]  # ops above are
+    # used in the original graph to create
+    # logits and softmax heads
 
     nodes1 = model1.graph.node
     nodes1_names = [node.name for node in nodes1]
+
     nodes2 = model2.graph.node
     nodes2_names = [node.name for node in nodes2]
 
+    # Extract ops which are in nodes1 but not in nodes2
     nodes1_names_diff = [
-        node_name.split("_")[0]
-        for node_name in nodes1_names
-        if node_name not in nodes2_names
+        node_name for node_name in nodes1_names if node_name not in nodes2_names
     ]
 
+    # Extract ops which are in nodes2 but not in nodes1
     nodes2_names_diff = [
-        node_name.split("_")[0]
-        for node_name in nodes2_names
-        if node_name not in nodes1_names
+        node_name for node_name in nodes2_names if node_name not in nodes1_names
+    ]
+    # Assert that there are no important ops names in
+    # nodes1_names_diff or nodes2_names_diff
+    assert not [
+        x for x in nodes1_names_diff if x.split("_")[0] not in optional_nodes_model1
+    ]
+    assert not [
+        x for x in nodes2_names_diff if x.split("_")[0] not in optional_nodes_model2
     ]
 
-    assert not [x for x in nodes1_names_diff if x not in optional_nodes_model1]
-    assert not [x for x in nodes2_names_diff if x not in optional_nodes_model2]
-
+    # Compare the structure of nodes which share names across m1 and m2
     for node1 in nodes1:
         if node1.name in set(nodes1_names).intersection(set(nodes2_names)):
             for node2 in nodes2:
@@ -68,8 +87,8 @@ def _compare_onnx_models(model1, model2):
 
 
 def _compare_onnx_nodes(n1, n2):
-    # checking for consistent lens seems like a sufficient test.
-    # due to internal structure, the naming of connected graph nodes
+    # checking for consistent lengths seems like a sufficient test for now.
+    # due to internal structure, the naming of graph nodes
     # may vary, even thought the semantics remain unchanged.
     assert len(n1.input) == len(n2.input)
     assert len(n1.output) == len(n2.output)
@@ -88,38 +107,55 @@ def _compare_onnx_nodes(n1, n2):
     ],
     scope="function",
 )
-class TestOnnxExport:
-    # since we are testing multiple consecutive functionalities
-    # decided to follow the structure similar to tests for pruning modifiers
-    # (test_lifecycle which encapsulates granular tests)
-    def test_lifecycle(self, model_stub, task, recipe_present):
+class TestModelFromZoo:
+    @pytest.fixture()
+    def setup(self, model_stub, recipe_present, task):
+        # setup
         model = Zoo.load_model_from_stub(model_stub)
         model.download()
 
         path_onnx = model.onnx_file.downloaded_path()
         model_path = os.path.join(os.path.dirname(path_onnx), "pytorch")
-        path_retrieved_onnx = "retrieved_model.onnx"
 
-        def _test_export_transformer_to_onnx(model_path, path_retrieved_onnx, task):
-            path_retrieved_onnx = export_transformer_to_onnx(
-                task=task,
-                model_path=model_path,
-                onnx_file_name=path_retrieved_onnx,
-            )
-            assert onnx.load(path_retrieved_onnx)
+        yield path_onnx, model_path, recipe_present, task
 
-        def _test_assert_yaml_recipe_present(model_path, recipe_present):
-            assert recipe_present == any(
-                [
-                    file
-                    for file in glob.glob(os.path.join(model_path, "*"))
-                    if file.endswith(".yaml")
-                ]
-            )
+        # teardown
+        shutil.rmtree(os.path.dirname(model_path))
 
-        _test_export_transformer_to_onnx(model_path, path_retrieved_onnx, task)
-        _test_assert_yaml_recipe_present(model_path, recipe_present)
-        _compare_onnx_models(
-            onnx.load(path_onnx),
-            onnx.load(os.path.join(model_path, path_retrieved_onnx)),
+    def test_load_weights_apply_recipe(self, setup):
+        path_onnx, model_path, recipe_present, task = setup
+        config = AutoConfig.from_pretrained(model_path)
+        model = load_task_model(task, model_path, config)
+
+        assert model
+        assert recipe_present == is_yaml_recipe_present(model_path)
+        if recipe_present:
+            self._test_apply_recipe(model, model_path)
+
+    @staticmethod
+    def _test_apply_recipe(model, model_path):
+        trainer = Trainer(
+            model=model,
+            model_state_path=model_path,
+            recipe=None,
+            recipe_args=None,
+            teacher=None,
         )
+        applied = trainer.apply_manager(epoch=math.inf, checkpoint=None)
+
+        assert applied
+
+    def test_export_to_onnx(self, setup):
+        path_onnx, model_path, recipe_present, task = setup
+        path_retrieved_onnx = export_transformer_to_onnx(
+            task=task,
+            model_path=model_path,
+            onnx_file_name="retrieved_model.onnx",
+        )
+
+        m1 = onnx.load(path_onnx)
+        m2 = onnx.load(os.path.join(model_path, path_retrieved_onnx))
+
+        assert m2
+
+        _compare_onnx_models(m1, m2)
