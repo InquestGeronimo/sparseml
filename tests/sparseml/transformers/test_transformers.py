@@ -21,6 +21,7 @@ import onnx
 import pytest
 from transformers import AutoConfig
 
+import sparseml.transformers as _transformers  # noqa: F401
 from sparseml.transformers.sparsification import Trainer
 from sparsezoo import Zoo
 from src.sparseml.transformers import export_transformer_to_onnx, load_task_model
