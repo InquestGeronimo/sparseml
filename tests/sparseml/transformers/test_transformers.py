@@ -11,29 +11,47 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#import sparseml.transformers as __transformers  # noqa: F401
 
 import glob
 import math
 import os
 import shutil
+import tarfile
 
+import numpy as np
 import onnx
+import onnxruntime as ort
 import pytest
-from sparseml.transformers.sparsification import Trainer
 from transformers import AutoConfig
+
+from sparseml.transformers.sparsification import Trainer
 from sparsezoo import Zoo
 from src.sparseml.transformers import export_transformer_to_onnx, load_task_model
 
 
-def is_yaml_recipe_present(model_path):
+def _is_yaml_recipe_present(model_path):
     return any(
         [
             file
             for file in glob.glob(os.path.join(model_path, "*"))
-            if file.endswith(".yaml")
+            if (file.endswith(".yaml") or ("recipe" in file))
         ]
     )
+
+
+def _run_inference_onnx(path_onnx, input):
+    ort_sess = ort.InferenceSession(path_onnx)
+    with np.load(input) as data:
+        input_0, input_1, input_2 = (
+            data["input_0"].reshape(1, -1),
+            data["input_1"].reshape(1, -1),
+            data["input_2"].reshape(1, -1),
+        )
+    output = ort_sess.run(
+        None,
+        {"input_ids": input_0, "attention_mask": input_1, "token_type_ids": input_2},
+    )
+    return output
 
 
 def _compare_onnx_models(model1, model2):
@@ -128,22 +146,41 @@ class TestModelFromZoo:
         model = load_task_model(task, model_path, config)
 
         assert model
-        assert recipe_present == is_yaml_recipe_present(model_path)
+        assert recipe_present == _is_yaml_recipe_present(model_path)
         if recipe_present:
-            self._test_apply_recipe(model, model_path)
 
-    @staticmethod
-    def _test_apply_recipe(model, model_path):
-        trainer = Trainer(
-            model=model,
-            model_state_path=model_path,
-            recipe=None,
-            recipe_args=None,
-            teacher=None,
+            trainer = Trainer(
+                model=model,
+                model_state_path=model_path,
+                recipe=None,
+                recipe_args=None,
+                teacher=None,
+            )
+            applied = trainer.apply_manager(epoch=math.inf, checkpoint=None)
+
+            assert applied
+
+    def test_outputs(self, setup):
+        path_onnx, model_path, recipe_present, task = setup
+        path_retrieved_onnx = export_transformer_to_onnx(
+            task=task,
+            model_path=model_path,
+            onnx_file_name="retrieved_model.onnx",
         )
-        applied = trainer.apply_manager(epoch=math.inf, checkpoint=None)
 
-        assert applied
+        inputs_tar_path = os.path.join(
+            os.path.dirname(path_onnx), "sample-inputs.tar.gz"
+        )
+        my_tar = tarfile.open(inputs_tar_path)
+        my_tar.extractall(model_path)
+        my_tar.close()
+
+        inputs = glob.glob(os.path.join(model_path, "sample-inputs/*"))
+        for input in inputs:
+            out1 = _run_inference_onnx(path_onnx, input)
+            out2 = _run_inference_onnx(path_retrieved_onnx, input)
+            for o1, o2 in zip(out1, out2):
+                pytest.approx(o1, abs=1e-5) == o2
 
     def test_export_to_onnx(self, setup):
         path_onnx, model_path, recipe_present, task = setup
