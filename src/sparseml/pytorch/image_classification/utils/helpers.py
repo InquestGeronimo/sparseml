@@ -26,8 +26,12 @@ from torch.nn import functional as torch_functional
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 
-from sparseml.pytorch.datasets import DatasetRegistry, ssd_collate_fn, yolo_collate_fn
-from sparseml.pytorch.datasets import ImageFolderFFCV
+from sparseml.pytorch.datasets import (
+    DatasetRegistry,
+    FFCVCompatibleDataset,
+    ssd_collate_fn,
+    yolo_collate_fn,
+)
 from sparseml.pytorch.models import ModelRegistry
 from sparseml.pytorch.optim import ScheduledModifierManager, ScheduledOptimizer
 from sparseml.pytorch.sparsification import ConstantPruningModifier
@@ -227,15 +231,6 @@ def _create_ffcv_train_and_val_loaders(args, image_size: int = 224):
         **args.dataset_kwargs,
     )
 
-    ffcv_train_dataset = ImageFolderFFCV(
-        dataset=train_dataset,
-    )
-
-    train_loader = ffcv_train_dataset.get_loader(
-        num_workers=args.loader_num_workers,
-        batch_size=args.train_batch_size,
-    )
-
     val_dataset = DatasetRegistry.create(
         args.dataset,
         root=args.dataset_path,
@@ -245,14 +240,24 @@ def _create_ffcv_train_and_val_loaders(args, image_size: int = 224):
         **args.dataset_kwargs,
     )
 
-    ffcv_val_dataset = ImageFolderFFCV(
-        dataset=val_dataset, write_path="data/ffcv/val.beton"
+    if not (
+        isinstance(train_dataset, FFCVCompatibleDataset)
+        and isinstance(val_dataset, FFCVCompatibleDataset)
+    ):
+        raise ValueError("The Datasets have to be FFCV compatible for using ffcv")
+
+    train_loader = train_dataset.get_ffcv_loader(
+        write_path="data/ffcv-train.beton",
+        num_workers=args.loader_num_workers,
+        batch_size=args.train_batch_size,
+        device=args.device,
     )
 
-    val_loader = ffcv_val_dataset.get_loader(
+    val_loader = val_dataset.get_ffcv_loader(
+        write_path="data/ffcv-val.beton",
         num_workers=args.loader_num_workers,
         batch_size=args.test_batch_size,
-        validation=True,
+        device=args.device,
     )
 
     return train_dataset, train_loader, val_dataset, val_loader
