@@ -332,7 +332,7 @@ class DistillationModifier(ScheduledUpdateModifier):
         loss = super().loss_update(
             loss, module, optimizer, epoch, steps_per_epoch, **kwargs
         )
-        self._loss_terms["DistillationModifier/task_loss"] = loss
+        self._loss_terms["task_loss"] = loss
         if not self.update_ready(epoch, steps_per_epoch):
             return loss
 
@@ -385,12 +385,11 @@ class DistillationModifier(ScheduledUpdateModifier):
             )
             self._loss_terms.update(
                 {
-                    "DistillationModifier/teacher_loss": teacher_loss,
-                    "DistillationModifier/total_loss": total_loss
+                    "teacher_loss": teacher_loss,
+                    "total_loss": total_loss
                 }
             )
         else:
-            assert False, "Temporarily disable this code"
             kldiv_output_loss = (
                 self._kldiv_output_loss(student_outputs, teacher_outputs)
                 if self.alpha_ce > 0.0
@@ -410,9 +409,9 @@ class DistillationModifier(ScheduledUpdateModifier):
             )
             self._loss_terms.update(
                 {
-                    "DistillationModifier/kldiv_output_loss": kldiv_output_loss,
-                    "DistillationModifier/cosine_embedding_loss": cosine_embedding_loss,
-                    "DistillationModifier/total_loss": total_loss
+                    "kldiv_output_loss": kldiv_output_loss,
+                    "cosine_embedding_loss": cosine_embedding_loss,
+                    "total_loss": total_loss
                 }
             )
 
